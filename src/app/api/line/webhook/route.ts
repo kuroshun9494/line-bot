@@ -70,10 +70,17 @@ export async function POST(req: NextRequest) {
             temperature: 0.7,
           }),
         });
+        if (!r.ok) {
+          const bodyText = await r.text();
+          console.error("openai_error", { status: r.status, body: bodyText.slice(0, 200) });
+        } else {
         type OpenAIChat = { choices?: { message?: { content?: string } }[] };
         const data = (await r.json()) as OpenAIChat;
         aiText = data?.choices?.[0]?.message?.content?.trim() ?? aiText;
-      } catch {}
+        }
+      } catch (e: unknown){
+        console.error("openai_fetch_failed", { message: (e as Error).message });
+      }
 
       await client.replyMessage(event.replyToken, { type: "text", text: aiText });
     })
