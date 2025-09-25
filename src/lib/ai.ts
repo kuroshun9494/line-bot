@@ -96,3 +96,49 @@ export async function chatVision({
   const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
   return data?.choices?.[0]?.message?.content?.trim() ?? "";
 }
+
+
+// 名前推測
+export async function guessGivenNameLLM(displayName: string): Promise<string | null> {
+  const sys = [
+    "You extract a likely GIVEN NAME (first name / calling name) from a LINE display name.",
+    "Return strict JSON only: {\"given_name\":\"...\"}. No prose. No markdown.",
+    "Rules:",
+    "- If Japanese full name (e.g., 山田 太郎 or 山田太郎), given_name is the likely calling name (太郎).",
+    "- If English (John Smith), given_name is the first token (John).",
+    "- If nickname in brackets exists (山田太郎（たろ）), prefer bracket content (たろ).",
+    "- Strip emojis/symbols. Ignore team/company prefixes.",
+    "- If uncertain, choose the shortest natural calling token (<=6 chars) or last 2 Japanese chars.",
+    "- If impossible, return {\"given_name\":null}.",
+    "Only output JSON."
+  ].join("\n");
+
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 16,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: displayName }
+      ],
+    }),
+  });
+
+  if (!r.ok) {
+    // 失敗はフォールバックさせるため null を返す
+    return null;
+  }
+  try {
+    const data = await r.json() as { choices?: { message?: { content?: string } }[] };
+    const text = data?.choices?.[0]?.message?.content ?? "";
+    const obj = JSON.parse(text) as { given_name: string | null };
+    if (!obj || typeof obj.given_name !== "string") return null;
+    const name = obj.given_name.trim();
+    return name.length ? name : null;
+  } catch {
+    return null;
+  }
+}

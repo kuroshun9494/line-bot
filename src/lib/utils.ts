@@ -23,3 +23,4 @@ export function wantsRewardFromText(input: string): boolean {
   const hasImageWord = /(画像|写真|pic|picture|photo|image)/i.test(z);
   return (hasRewardWord && wantsVerb) || (hasImageWord && wantsVerb) || /ご褒美(ちょうだい|くれ|ください)/.test(input);
 }
+
