@@ -8,8 +8,8 @@ export const MENTION_KEYWORDS = (process.env.LINE_MENTION_KEYWORDS || "ひとみ
 
 // ランダム添付の確率（通常時）
 export const REWARD_RANDOM_RATE = (() => {
-  const n = Number(process.env.REWARD_RANDOM_RATE ?? "0.35");
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.35;
+  const n = Number(process.env.REWARD_RANDOM_RATE ?? "0.25");
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.25;
 })();
 
 // おねだり時の添付確率（高め）
