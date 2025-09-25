@@ -14,6 +14,34 @@ const MENTION_KEYWORDS = (process.env.LINE_MENTION_KEYWORDS || "ひとみ,@ひ�
   .map((s) => s.trim())
   .filter(Boolean);
 
+/* ===== 画像許可の猶予時間（直前メンションからのグレース） ===== */
+const MENTION_GRACE_MS = 60_000; // 1分
+
+/* ===== 直近メンション記録（同一インスタンス内で短期保持） ===== */
+const recentMentions = new Map<string, number>(); // key: source+user, value: timestamp(ms)
+
+function sourceKey(e: MessageEvent): string | null {
+  const s = e.source as { type: "user" | "group" | "room"; userId?: string; groupId?: string; roomId?: string };
+  if (s.type === "user" && s.userId) return `user:${s.userId}`;
+  if (s.type === "group" && s.groupId && s.userId) return `group:${s.groupId}:u:${s.userId}`;
+  if (s.type === "room"  && s.roomId  && s.userId) return `room:${s.roomId}:u:${s.userId}`;
+  return null;
+}
+function noteRecentMention(e: MessageEvent): void {
+  const k = sourceKey(e);
+  if (!k) return;
+  recentMentions.set(k, Date.now());
+}
+function withinRecentMention(e: MessageEvent): boolean {
+  const k = sourceKey(e);
+  if (!k) return false;
+  const t = recentMentions.get(k);
+  if (!t) return false;
+  const ok = Date.now() - t <= MENTION_GRACE_MS;
+  if (!ok) recentMentions.delete(k); // 期限切れを掃除
+  return ok;
+}
+
 /* ===== LINE Client（遅延初期化） ===== */
 let _lineClient: Client | null = null;
 function getLineClient(): Client {
@@ -30,7 +58,7 @@ let _botUserId: string | null = null;
 async function getBotUserId(client: Client): Promise<string | null> {
   if (_botUserId) return _botUserId;
   try {
-    const info = await client.getBotInfo(); // SDKに実装あり
+    const info = await client.getBotInfo();
     _botUserId = info.userId;
     return _botUserId;
   } catch {
@@ -94,7 +122,7 @@ async function getDisplayName(client: Client, e: MessageEvent): Promise<string |
       const p = await client.getRoomMemberProfile(src.roomId, src.userId);
       return p?.displayName ?? null;
     }
-  } catch { }
+  } catch {}
   return null;
 }
 
@@ -120,7 +148,6 @@ function buildSystemPrompt(nameHint?: string): string {
 }
 
 /* ===== メンション判定（型安全） ===== */
-// SDKの型は mentionees に isSelf が無い想定。→ bot の userId と照合で判定。
 type Mentionee = { index: number; length: number; type: "user" | "all"; userId?: string };
 type MentionPayload = { mention?: { mentionees?: Mentionee[] } };
 
@@ -144,12 +171,12 @@ function containsMentionKeyword(text: string): boolean {
 function pickRandomReward(baseOrigin: string): { original: string; preview: string } | null {
   const pubDir = path.join(process.cwd(), "public", "rewards");
   if (!fs.existsSync(pubDir)) return null;
-  const files = fs.readdirSync(pubDir).filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f)); // ← jpg/png 推奨
+  const files = fs.readdirSync(pubDir).filter((f) => /\.(png|jpe?g)$/i.test(f)); // jpg/png 推奨
   if (files.length === 0) return null;
   const idx = Math.floor(Math.random() * files.length);
   const file = files[idx];
   const url = `${baseOrigin}/rewards/${encodeURIComponent(file)}`;
-  return { original: url, preview: url }; // プレビューも同一でOK（軽い画像推奨）
+  return { original: url, preview: url }; // プレビュー同一でOK（軽い画像推奨）
 }
 
 /* ===== Verify（GET/HEAD） ===== */
@@ -183,10 +210,15 @@ export async function POST(req: NextRequest) {
           const userText = event.message.text;
           const mentioned = (await isMentionedBot(event, client)) || containsMentionKeyword(userText);
           if (!mentioned) return; // 反応しない
+          // ← グループ/ルームでメンションを検知：画像用の1分猶予を記録
+          noteRecentMention(event);
         }
       } else if (isImageMessageEvent(event)) {
         const srcType = event.source.type;
-        if (srcType !== "user") return; // 画像単体はメンション不可のため無視
+        if (srcType !== "user") {
+          // 画像単体はメンション不可：直前1分以内に同ユーザーのメンションがあれば許可
+          if (!withinRecentMention(event)) return;
+        }
       } else {
         return;
       }
