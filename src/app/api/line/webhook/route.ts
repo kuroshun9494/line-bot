@@ -1,90 +1,264 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Client, validateSignature } from "@line/bot-sdk";
-import type { WebhookEvent, MessageEvent, TextEventMessage } from "@line/bot-sdk";
+import type { WebhookEvent, MessageEvent, TextEventMessage, ImageEventMessage } from "@line/bot-sdk";
+import fs from "node:fs";
+import path from "node:path";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ---- LINE Client を遅延初期化 ----
+// ---- LINE Client（遅延初期化）
 let _lineClient: Client | null = null;
 function getLineClient(): Client {
   if (_lineClient) return _lineClient;
-
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
   const secret = process.env.LINE_CHANNEL_SECRET;
-  if (!token || !secret) {
-    // ← ここで throw しても「リクエスト時」にしか実行されない
-    throw new Error("Missing LINE credentials (LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET).");
-  }
+  if (!token || !secret) throw new Error("Missing LINE credentials (LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET).");
   _lineClient = new Client({ channelAccessToken: token, channelSecret: secret });
   return _lineClient;
 }
 
-// Verify用
-export async function GET() {
-  return NextResponse.json({ ok: true, endpoint: "LINE webhook (GET)" }, { status: 200 });
-}
-export async function HEAD() {
-  return new NextResponse(null, { status: 200 });
+// ===== ユーティリティ =====
+type Metrics = { distanceKm?: number; minutes?: number; paceMinPerKm?: number; reps?: number };
+function parseMetrics(text: string): Metrics {
+  const t = text.replace(/，/g, ",").replace(/．/g, ".").replace(/\s+/g, "");
+  const m: Metrics = {};
+  const dist = t.match(/(\d+(?:\.\d+)?)\s*(?:km|キロ|㌔)/i);
+  const mins = t.match(/(\d+)\s*(?:分|min)/i);
+  const hrs  = t.match(/(\d+(?:\.\d+)?)\s*(?:時間|h)/i);
+  const pace = t.match(/(\d+)[':：](\d{1,2})\/?km/i); // 5'30/kmなど
+  const reps = t.match(/(\d+)\s*(?:回|reps?)/i);
+  if (dist) m.distanceKm = parseFloat(dist[1]);
+  if (hrs)  m.minutes = Math.round(parseFloat(hrs[1]) * 60);
+  if (mins) m.minutes = (m.minutes ?? 0) + parseInt(mins[1], 10);
+  if (pace) m.paceMinPerKm = parseInt(pace[1], 10) + parseInt(pace[2], 10) / 60;
+  if (reps) m.reps = parseInt(reps[1], 10);
+  return m;
 }
 
+function isTextMessageEvent(e: WebhookEvent): e is MessageEvent & { message: TextEventMessage } {
+  return e.type === "message" && (e as MessageEvent).message.type === "text";
+}
+function isImageMessageEvent(e: WebhookEvent): e is MessageEvent & { message: ImageEventMessage } {
+  return e.type === "message" && (e as MessageEvent).message.type === "image";
+}
+
+function daysUntilItabashi(): number {
+  const race = new Date("2026-03-15T00:00:00+09:00").getTime();
+  const now  = Date.now();
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.max(0, Math.ceil((race - now) / msPerDay));
+}
+
+function pickRandomReward(baseOrigin: string): { original: string; preview: string } | null {
+  const pubDir = path.join(process.cwd(), "public", "rewards");
+  if (!fs.existsSync(pubDir)) return null;
+  const files = fs.readdirSync(pubDir).filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f));
+  if (files.length === 0) return null;
+  const idx = Math.floor(Math.random() * files.length);
+  const file = files[idx];
+  const url = `${baseOrigin}/rewards/${encodeURIComponent(file)}`;
+  return { original: url, preview: url };
+}
+
+// ざっくりMIME判定（jpeg/png/webp/gif）
+function sniffImageMime(buf: Buffer): string {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf.slice(0, 8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return "image/png";
+  if (buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  if (buf.slice(0, 6).toString("ascii") === "GIF87a" || buf.slice(0, 6).toString("ascii") === "GIF89a") return "image/gif";
+  return "image/jpeg";
+}
+
+// 投稿者名取得（user / group / room）
+async function getDisplayName(client: Client, e: MessageEvent): Promise<string | null> {
+  const src = e.source as { type: "user" | "group" | "room"; userId?: string; groupId?: string; roomId?: string };
+  try {
+    if (src.type === "user" && src.userId) {
+      const p = await client.getProfile(src.userId);
+      return p?.displayName ?? null;
+    }
+    if (src.type === "group" && src.groupId && src.userId) {
+      const p = await client.getGroupMemberProfile(src.groupId, src.userId);
+      return p?.displayName ?? null;
+    }
+    if (src.type === "room" && src.roomId && src.userId) {
+      const p = await client.getRoomMemberProfile(src.roomId, src.userId);
+      return p?.displayName ?? null;
+    }
+  } catch {}
+  return null;
+}
+
+function buildSystemPrompt(nameHint?: string): string {
+  const d = daysUntilItabashi();
+  const nameLine = nameHint ? `可能なら文頭で「${nameHint}」と呼びかけること。` : "呼びかけは自然に。";
+  return [
+    "あなたは「ひとみ」という架空のトップランナー。実在人物ではないが、明るく可愛い天使系の彼女キャラで、タメ口で話す。絵文字は1個まで。",
+    "前提: ユーザーは 2026/03/15 の『板橋Cityマラソン（フル）』に出るためトレ中。複数人が使うため、投稿者ごとに個別対応する。",
+    `大会まで残りおよそ ${d} 日。${nameLine}`,
+    "振る舞い:",
+    "1) トレ報告（距離/時間/ペース/回数等あり）: 数値を拾って具体的に称賛→次のミニ目標を1つだけ提案（過負荷NG、+0.5〜1kmや+5〜10分など穏やかに）。",
+    "2) 雑談/非トレ: みんなのアイドル風に、明るく可愛いタメ口で短く返す。",
+    "制約: 3行以内。上から目線/説教/無根拠の医療助言/他者比較は禁止。",
+  ].join("\n");
+}
+
+// ===== Verify（GET/HEAD）
+export async function GET() { return NextResponse.json({ ok: true, endpoint: "LINE webhook (GET)" }, { status: 200 }); }
+export async function HEAD() { return new NextResponse(null, { status: 200 }); }
+
+// ===== Webhook（POST）
 export async function POST(req: NextRequest) {
-  const raw = await req.text();
+  // 署名検証（Bufferで）
   const signature = req.headers.get("x-line-signature") ?? "";
   const secret = process.env.LINE_CHANNEL_SECRET ?? "";
-
-  if (!validateSignature(raw, secret, signature)) {
+  const rawBuf = Buffer.from(await req.arrayBuffer());
+  if (!secret || !validateSignature(rawBuf, secret, signature)) {
     return NextResponse.json({ error: "bad signature" }, { status: 401 });
   }
 
-  const body = JSON.parse(raw) as { events: WebhookEvent[] };
+  const body = JSON.parse(rawBuf.toString("utf8")) as { events: WebhookEvent[] };
   const events = body?.events ?? [];
-
-  const isText = (e: WebhookEvent): e is MessageEvent & { message: TextEventMessage } =>
-    e.type === "message" && (e as MessageEvent).message.type === "text";
-
   const client = getLineClient();
+  const origin = req.nextUrl.origin;
 
-  await Promise.all(
-    events.map(async (event) => {
-      if (!isText(event)) return;
+  await Promise.all(events.map(async (event) => {
+    const redelivered = "deliveryContext" in event && (event as any).deliveryContext?.isRedelivery === true;
+    if (redelivered) return;
 
+    // テキスト or 画像の分岐
+    if (isTextMessageEvent(event)) {
       const userText = event.message.text;
+      const displayName = await getDisplayName(client, event);
+      const metrics = parseMetrics(userText);
+      const metricHint =
+        metrics.distanceKm || metrics.minutes || metrics.paceMinPerKm || metrics.reps
+          ? `抽出した数値: ${JSON.stringify(metrics)}`
+          : "抽出できる数値は無し。";
 
-      // --- OpenAI 呼び出し（必要時のみ使う。トップレベルでは参照しない）---
-      let aiText = "うまく応答を生成できませんでした。もう一度お願いします！";
+      let aiText = "今は忙しいので、また後で話しかけてね！";
       try {
         const r = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-          },
+          headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             model: "gpt-4o-mini",
             messages: [
-              { role: "system", content: "ラン/筋トレを短く前向きに称賛し、次の小目標を1つ提案。絵文字は1個、3行以内。" },
+              { role: "system", content: buildSystemPrompt(displayName ?? undefined) },
+              { role: "system", content: metricHint },
               { role: "user", content: userText },
             ],
-            max_tokens: 180,
+            max_tokens: 160,
             temperature: 0.7,
           }),
         });
         if (!r.ok) {
           const bodyText = await r.text();
+          if (r.status === 429 && bodyText.includes("insufficient_quota")) {
+            await client.replyMessage(event.replyToken, { type: "text", text: "ごめん、いまAIの上限に達しちゃってる…ちょっと後でまた話しかけて？🙏" });
+            return;
+          }
           console.error("openai_error", { status: r.status, body: bodyText.slice(0, 200) });
         } else {
-        type OpenAIChat = { choices?: { message?: { content?: string } }[] };
-        const data = (await r.json()) as OpenAIChat;
-        aiText = data?.choices?.[0]?.message?.content?.trim() ?? aiText;
+          type OpenAIChat = { choices?: { message?: { content?: string } }[] };
+          const data = (await r.json()) as OpenAIChat;
+          aiText = data?.choices?.[0]?.message?.content?.trim() ?? aiText;
         }
-      } catch (e: unknown){
+      } catch (e: unknown) {
         console.error("openai_fetch_failed", { message: (e as Error).message });
       }
 
-      await client.replyMessage(event.replyToken, { type: "text", text: aiText });
-    })
-  );
+      const reward = pickRandomReward(origin);
+      if (reward) {
+        await client.replyMessage(event.replyToken, [
+          { type: "text", text: aiText },
+          { type: "image", originalContentUrl: reward.original, previewImageUrl: reward.preview },
+        ]);
+      } else {
+        await client.replyMessage(event.replyToken, { type: "text", text: aiText });
+      }
+      return;
+    }
+
+    if (isImageMessageEvent(event)) {
+      // 画像を取得（バイナリ）
+      let buf: Buffer | null = null;
+      try {
+        const stream = await client.getMessageContent(event.message.id);
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+          stream.on("data", (c: Buffer) => chunks.push(c));
+          stream.on("error", reject);
+          stream.on("end", () => resolve());
+        });
+        buf = Buffer.concat(chunks);
+      } catch (e: unknown) {
+        console.error("line_content_fetch_failed", { message: (e as Error).message });
+      }
+      // 画像が取れなければフォールバック
+      if (!buf) {
+        await client.replyMessage(event.replyToken, { type: "text", text: "画像がうまく受け取れなかったみたい…もう一度送ってくれる？" });
+        return;
+      }
+
+      const mime = sniffImageMime(buf);
+      const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+      const displayName = await getDisplayName(client, event);
+
+      // Vision入力で“ひとみ”返信
+      let aiText = "今は忙しいので、また後で話しかけてね！";
+      try {
+        const r = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: buildSystemPrompt(displayName ?? undefined) },
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "この画像がトレの記録（時計/アプリ等）なら、距離・時間・ペース・回数など数値を読み取って具体的に褒め、次のミニ目標を1つだけ提案。風景など数値が読めない場合は推測せず、状況に寄り添って短く励ましてね。日本語、タメ口、3行以内、絵文字は1個まで。" },
+                  { type: "image_url", image_url: { url: dataUrl } }
+                ]
+              }
+            ],
+            max_tokens: 160,
+            temperature: 0.7,
+          }),
+        });
+        if (!r.ok) {
+          const bodyText = await r.text();
+          if (r.status === 429 && bodyText.includes("insufficient_quota")) {
+            await client.replyMessage(event.replyToken, { type: "text", text: "ごめん、いまAIの上限に達しちゃってる…ちょっと後でまた話しかけて？🙏" });
+            return;
+          }
+          console.error("openai_error", { status: r.status, body: bodyText.slice(0, 200) });
+        } else {
+          type OpenAIChat = { choices?: { message?: { content?: string } }[] };
+          const data = (await r.json()) as OpenAIChat;
+          aiText = data?.choices?.[0]?.message?.content?.trim() ?? aiText;
+        }
+      } catch (e: unknown) {
+        console.error("openai_fetch_failed", { message: (e as Error).message });
+      }
+
+      const reward = pickRandomReward(origin);
+      if (reward) {
+        await client.replyMessage(event.replyToken, [
+          { type: "text", text: aiText },
+          { type: "image", originalContentUrl: reward.original, previewImageUrl: reward.preview },
+        ]);
+      } else {
+        await client.replyMessage(event.replyToken, { type: "text", text: aiText });
+      }
+      return;
+    }
+
+    // 他タイプは無視
+    return;
+  }));
 
   return NextResponse.json({ ok: true });
 }
