@@ -7,7 +7,14 @@ import path from "node:path";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ---- LINE Client（遅延初期化）
+/* ===== メンション設定（Env） ===== */
+const MENTION_ONLY = (process.env.LINE_MENTION_ONLY || "false").toLowerCase() === "true";
+const MENTION_KEYWORDS = (process.env.LINE_MENTION_KEYWORDS || "ひとみ,@ひとみ")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/* ===== LINE Client（遅延初期化） ===== */
 let _lineClient: Client | null = null;
 function getLineClient(): Client {
   if (_lineClient) return _lineClient;
@@ -18,18 +25,31 @@ function getLineClient(): Client {
   return _lineClient;
 }
 
-// ===== ユーティリティ =====
+/* ===== Bot 自身の userId を取得（キャッシュ） ===== */
+let _botUserId: string | null = null;
+async function getBotUserId(client: Client): Promise<string | null> {
+  if (_botUserId) return _botUserId;
+  try {
+    const info = await client.getBotInfo(); // SDKに実装あり
+    _botUserId = info.userId;
+    return _botUserId;
+  } catch {
+    return null;
+  }
+}
+
+/* ===== ユーティリティ ===== */
 type Metrics = { distanceKm?: number; minutes?: number; paceMinPerKm?: number; reps?: number };
 function parseMetrics(text: string): Metrics {
   const t = text.replace(/，/g, ",").replace(/．/g, ".").replace(/\s+/g, "");
   const m: Metrics = {};
   const dist = t.match(/(\d+(?:\.\d+)?)\s*(?:km|キロ|㌔)/i);
   const mins = t.match(/(\d+)\s*(?:分|min)/i);
-  const hrs = t.match(/(\d+(?:\.\d+)?)\s*(?:時間|h)/i);
+  const hrs  = t.match(/(\d+(?:\.\d+)?)\s*(?:時間|h)/i);
   const pace = t.match(/(\d+)[':：](\d{1,2})\/?km/i); // 5'30/kmなど
   const reps = t.match(/(\d+)\s*(?:回|reps?)/i);
   if (dist) m.distanceKm = parseFloat(dist[1]);
-  if (hrs) m.minutes = Math.round(parseFloat(hrs[1]) * 60);
+  if (hrs)  m.minutes = Math.round(parseFloat(hrs[1]) * 60);
   if (mins) m.minutes = (m.minutes ?? 0) + parseInt(mins[1], 10);
   if (pace) m.paceMinPerKm = parseInt(pace[1], 10) + parseInt(pace[2], 10) / 60;
   if (reps) m.reps = parseInt(reps[1], 10);
@@ -43,33 +63,9 @@ function isImageMessageEvent(e: WebhookEvent): e is MessageEvent & { message: Im
   return e.type === "message" && (e as MessageEvent).message.type === "image";
 }
 
-function daysUntilItabashi(): number {
-  const race = new Date("2026-03-15T00:00:00+09:00").getTime();
-  const now = Date.now();
-  const msPerDay = 24 * 60 * 60 * 1000;
-  return Math.max(0, Math.ceil((race - now) / msPerDay));
-}
-
-function pickRandomReward(baseOrigin: string): { original: string; preview: string } | null {
-  const pubDir = path.join(process.cwd(), "public", "rewards");
-  if (!fs.existsSync(pubDir)) return null;
-  const files = fs.readdirSync(pubDir).filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f));
-  if (files.length === 0) return null;
-  const idx = Math.floor(Math.random() * files.length);
-  const file = files[idx];
-  const url = `${baseOrigin}/rewards/${encodeURIComponent(file)}`;
-  return { original: url, preview: url };
-}
-
 // deliveryContext を持つ可能性があるイベント用の補助型
-type DeliveryContextCapable = {
-  deliveryContext?: { isRedelivery?: boolean };
-};
-
-// 型ガード：deliveryContext を安全に扱えるようにする
-function hasDeliveryContext(
-  e: WebhookEvent
-): e is WebhookEvent & DeliveryContextCapable {
+type DeliveryContextCapable = { deliveryContext?: { isRedelivery?: boolean } };
+function hasDeliveryContext(e: WebhookEvent): e is WebhookEvent & DeliveryContextCapable {
   return typeof e === "object" && e !== null && "deliveryContext" in e;
 }
 
@@ -102,6 +98,13 @@ async function getDisplayName(client: Client, e: MessageEvent): Promise<string |
   return null;
 }
 
+function daysUntilItabashi(): number {
+  const race = new Date("2026-03-15T00:00:00+09:00").getTime();
+  const now  = Date.now();
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.max(0, Math.ceil((race - now) / msPerDay));
+}
+
 function buildSystemPrompt(nameHint?: string): string {
   const d = daysUntilItabashi();
   const nameLine = nameHint ? `可能なら文頭で「${nameHint}」と呼びかけること。` : "呼びかけは自然に。";
@@ -116,13 +119,46 @@ function buildSystemPrompt(nameHint?: string): string {
   ].join("\n");
 }
 
-// ===== Verify（GET/HEAD）
+/* ===== メンション判定（型安全） ===== */
+// SDKの型は mentionees に isSelf が無い想定。→ bot の userId と照合で判定。
+type Mentionee = { index: number; length: number; type: "user" | "all"; userId?: string };
+type MentionPayload = { mention?: { mentionees?: Mentionee[] } };
+
+function getMentionees(e: MessageEvent & { message: TextEventMessage }): Mentionee[] | undefined {
+  const m = (e.message as TextEventMessage & MentionPayload).mention?.mentionees;
+  return Array.isArray(m) ? m : undefined;
+}
+async function isMentionedBot(e: MessageEvent & { message: TextEventMessage }, client: Client): Promise<boolean> {
+  const ms = getMentionees(e);
+  if (!ms?.length) return false;
+  const botId = await getBotUserId(client);
+  if (!botId) return false;
+  return ms.some((x) => x.type === "user" && x.userId === botId);
+}
+function containsMentionKeyword(text: string): boolean {
+  const lower = text.toLowerCase();
+  return MENTION_KEYWORDS.some((k) => k && lower.includes(k.toLowerCase()));
+}
+
+/* ===== ご褒美画像：fs/path で public/rewards からランダム ===== */
+function pickRandomReward(baseOrigin: string): { original: string; preview: string } | null {
+  const pubDir = path.join(process.cwd(), "public", "rewards");
+  if (!fs.existsSync(pubDir)) return null;
+  const files = fs.readdirSync(pubDir).filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f)); // ← jpg/png 推奨
+  if (files.length === 0) return null;
+  const idx = Math.floor(Math.random() * files.length);
+  const file = files[idx];
+  const url = `${baseOrigin}/rewards/${encodeURIComponent(file)}`;
+  return { original: url, preview: url }; // プレビューも同一でOK（軽い画像推奨）
+}
+
+/* ===== Verify（GET/HEAD） ===== */
 export async function GET() { return NextResponse.json({ ok: true, endpoint: "LINE webhook (GET)" }, { status: 200 }); }
 export async function HEAD() { return new NextResponse(null, { status: 200 }); }
 
-// ===== Webhook（POST）
+/* ===== Webhook（POST） ===== */
 export async function POST(req: NextRequest) {
-  // 署名検証（Bufferで）
+  // 署名検証（Buffer）
   const signature = req.headers.get("x-line-signature") ?? "";
   const secret = process.env.LINE_CHANNEL_SECRET ?? "";
   const rawBuf = Buffer.from(await req.arrayBuffer());
@@ -136,11 +172,27 @@ export async function POST(req: NextRequest) {
   const origin = req.nextUrl.origin;
 
   await Promise.all(events.map(async (event) => {
-    if (hasDeliveryContext(event) && event.deliveryContext?.isRedelivery === true) {
-      return;
+    // 再送はスキップ
+    if (hasDeliveryContext(event) && event.deliveryContext?.isRedelivery === true) return;
+
+    /* ===== メンション必須モード（1:1は常に返信 / グループ・ルームのみ判定） ===== */
+    if (MENTION_ONLY) {
+      if (isTextMessageEvent(event)) {
+        const srcType = event.source.type; // 'user' | 'group' | 'room'
+        if (srcType !== "user") {
+          const userText = event.message.text;
+          const mentioned = (await isMentionedBot(event, client)) || containsMentionKeyword(userText);
+          if (!mentioned) return; // 反応しない
+        }
+      } else if (isImageMessageEvent(event)) {
+        const srcType = event.source.type;
+        if (srcType !== "user") return; // 画像単体はメンション不可のため無視
+      } else {
+        return;
+      }
     }
 
-    // テキスト or 画像の分岐
+    /* ===== テキスト ===== */
     if (isTextMessageEvent(event)) {
       const userText = event.message.text;
       const displayName = await getDisplayName(client, event);
@@ -194,6 +246,7 @@ export async function POST(req: NextRequest) {
       return;
     }
 
+    /* ===== 画像 ===== */
     if (isImageMessageEvent(event)) {
       // 画像を取得（バイナリ）
       let buf: Buffer | null = null;
@@ -209,7 +262,6 @@ export async function POST(req: NextRequest) {
       } catch (e: unknown) {
         console.error("line_content_fetch_failed", { message: (e as Error).message });
       }
-      // 画像が取れなければフォールバック
       if (!buf) {
         await client.replyMessage(event.replyToken, { type: "text", text: "画像がうまく受け取れなかったみたい…もう一度送ってくれる？" });
         return;
@@ -219,7 +271,6 @@ export async function POST(req: NextRequest) {
       const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
       const displayName = await getDisplayName(client, event);
 
-      // Vision入力で“ひとみ”返信
       let aiText = "今は忙しいので、また後で話しかけてね！";
       try {
         const r = await fetch("https://api.openai.com/v1/chat/completions", {
