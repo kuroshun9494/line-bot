@@ -25,11 +25,11 @@ function parseMetrics(text: string): Metrics {
   const m: Metrics = {};
   const dist = t.match(/(\d+(?:\.\d+)?)\s*(?:km|キロ|㌔)/i);
   const mins = t.match(/(\d+)\s*(?:分|min)/i);
-  const hrs  = t.match(/(\d+(?:\.\d+)?)\s*(?:時間|h)/i);
+  const hrs = t.match(/(\d+(?:\.\d+)?)\s*(?:時間|h)/i);
   const pace = t.match(/(\d+)[':：](\d{1,2})\/?km/i); // 5'30/kmなど
   const reps = t.match(/(\d+)\s*(?:回|reps?)/i);
   if (dist) m.distanceKm = parseFloat(dist[1]);
-  if (hrs)  m.minutes = Math.round(parseFloat(hrs[1]) * 60);
+  if (hrs) m.minutes = Math.round(parseFloat(hrs[1]) * 60);
   if (mins) m.minutes = (m.minutes ?? 0) + parseInt(mins[1], 10);
   if (pace) m.paceMinPerKm = parseInt(pace[1], 10) + parseInt(pace[2], 10) / 60;
   if (reps) m.reps = parseInt(reps[1], 10);
@@ -45,7 +45,7 @@ function isImageMessageEvent(e: WebhookEvent): e is MessageEvent & { message: Im
 
 function daysUntilItabashi(): number {
   const race = new Date("2026-03-15T00:00:00+09:00").getTime();
-  const now  = Date.now();
+  const now = Date.now();
   const msPerDay = 24 * 60 * 60 * 1000;
   return Math.max(0, Math.ceil((race - now) / msPerDay));
 }
@@ -61,10 +61,22 @@ function pickRandomReward(baseOrigin: string): { original: string; preview: stri
   return { original: url, preview: url };
 }
 
+// deliveryContext を持つ可能性があるイベント用の補助型
+type DeliveryContextCapable = {
+  deliveryContext?: { isRedelivery?: boolean };
+};
+
+// 型ガード：deliveryContext を安全に扱えるようにする
+function hasDeliveryContext(
+  e: WebhookEvent
+): e is WebhookEvent & DeliveryContextCapable {
+  return typeof e === "object" && e !== null && "deliveryContext" in e;
+}
+
 // ざっくりMIME判定（jpeg/png/webp/gif）
 function sniffImageMime(buf: Buffer): string {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
-  if (buf.slice(0, 8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return "image/png";
+  if (buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return "image/png";
   if (buf.slice(0, 4).toString("ascii") === "RIFF" && buf.slice(8, 12).toString("ascii") === "WEBP") return "image/webp";
   if (buf.slice(0, 6).toString("ascii") === "GIF87a" || buf.slice(0, 6).toString("ascii") === "GIF89a") return "image/gif";
   return "image/jpeg";
@@ -86,7 +98,7 @@ async function getDisplayName(client: Client, e: MessageEvent): Promise<string |
       const p = await client.getRoomMemberProfile(src.roomId, src.userId);
       return p?.displayName ?? null;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -124,8 +136,9 @@ export async function POST(req: NextRequest) {
   const origin = req.nextUrl.origin;
 
   await Promise.all(events.map(async (event) => {
-    const redelivered = "deliveryContext" in event && (event as any).deliveryContext?.isRedelivery === true;
-    if (redelivered) return;
+    if (hasDeliveryContext(event) && event.deliveryContext?.isRedelivery === true) {
+      return;
+    }
 
     // テキスト or 画像の分岐
     if (isTextMessageEvent(event)) {
