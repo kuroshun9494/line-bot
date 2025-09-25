@@ -1,7 +1,6 @@
 import type { MessageEvent } from "@line/bot-sdk";
 import { getDisplayName } from "./line";
 import { guessGivenNameLLM } from "./ai";
-import { guessGivenName } from "./utils"; // 以前作ったヒューリスティック（無ければ削ってOK）
 
 // シンプルなメモリキャッシュ（1日）
 const NAME_TTL_MS = Number(process.env.NAME_CACHE_TTL_MS ?? 86_400_000);
@@ -24,16 +23,6 @@ export async function getNameHintForEvent(client: any, e: MessageEvent): Promise
   let name: string | null = null;
   if (displayName) {
     name = await guessGivenNameLLM(displayName);
-  }
-
-  // ダメならローカルヒューリスティックにフォールバック
-  if (!name) {
-    try {
-      // guessGivenName を入れていない場合は、ここを displayName に差し替えてもOK
-      name = guessGivenName(displayName ?? "") || null;
-    } catch {
-      name = null;
-    }
   }
 
   nameCache.set(key, { name, ts: Date.now() });
