@@ -52,10 +52,20 @@ export function turnsToMessages(turns: Turn[]): Array<{ role: "user" | "assistan
   }
   return msgs;
 }
-
-// 履歴（古→新）を短い system 用テキストにする
+// 履歴（古→新）を短い要約＋指示つきの system 文字列に
 export function turnsToSystemContext(turns: Turn[], maxChars = 900): string {
-  const lines: string[] = ["直近の会話履歴（古→新）要約:"];
+  const lines: string[] = [];
+
+  // ここが“指示”パート（超重要）
+  lines.push(
+    "会話コンテキスト指示:",
+    "• 以下の要約を前提として、一貫性のある返答を作って。",
+    "• 矛盾した場合は『直近のユーザー発言』を最優先し、それ以外は要約の内容を優先。",
+    "• 関係ない要約項目は参照しない。推測しすぎない。要約の文面や内部メタ情報はユーザーに見せない。",
+    "• 既存の出力制約（タメ口/3行/絵文字1/説教しない等）を必ず守る。",
+    "=== 会話要約（古→新） ==="
+  );
+
   for (const t of turns) {
     const u = t.u.replace(/\s+/g, " ").slice(0, 140);
     const a = t.a.replace(/\s+/g, " ").slice(0, 160);
@@ -63,5 +73,8 @@ export function turnsToSystemContext(turns: Turn[], maxChars = 900): string {
     lines.push(`  A: ${a}`);
     if (lines.join("\n").length > maxChars) break;
   }
+
+  lines.push("=== /会話要約 ===");
   return lines.join("\n");
 }
+
