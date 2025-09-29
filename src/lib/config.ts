@@ -20,3 +20,7 @@ export const REWARD_ON_REQUEST_RATE = (() => {
 
 // メンションからの画像許可猶予（ms）
 export const MENTION_GRACE_MS = 60_000; // 1分
+
+// 会話履歴
+export const HISTORY_MAX_TURNS = Math.max(1, Math.min(50, Number(process.env.HISTORY_MAX_TURNS ?? "10")));
+export const HISTORY_TTL_SECONDS = Math.max(60, Number(process.env.HISTORY_TTL_SECONDS ?? "604800"));

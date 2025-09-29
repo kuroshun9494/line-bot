@@ -26,16 +26,20 @@ function buildSystemPromptBase(nameHint?: string, tone: RewardTone = "NONE"): st
   ].join("\n");
 }
 
+export type ChatMsg = { role: "user" | "assistant"; content: string };
+
 export async function chatText({
   userText,
   displayName,
   metricHint,
   rewardTone,
+  historyMessages,
 }: {
   userText: string;
   displayName?: string | null;
   metricHint?: string;
   rewardTone: RewardTone;
+  historyMessages?: ChatMsg[];
 }): Promise<string> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -45,6 +49,7 @@ export async function chatText({
       messages: [
         { role: "system", content: buildSystemPromptBase(displayName ?? undefined, rewardTone) },
         ...(metricHint ? [{ role: "system", content: metricHint }] : []),
+        ...(historyMessages ?? []),
         { role: "user", content: userText },
       ],
       max_tokens: 160,
@@ -64,10 +69,12 @@ export async function chatVision({
   dataUrl,
   displayName,
   rewardTone,
+  historyMessages, 
 }: {
   dataUrl: string;
   displayName?: string | null;
   rewardTone: RewardTone;
+  historyMessages?: ChatMsg[]; 
 }): Promise<string> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -76,6 +83,7 @@ export async function chatVision({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: buildSystemPromptBase(displayName ?? undefined, rewardTone) },
+        ...(historyMessages ?? []),
         {
           role: "user",
           content: [

@@ -31,6 +31,9 @@ import {
 import { chatText, chatVision, type RewardTone } from "@/lib/ai";
 import { getNameHintForEvent } from "@/lib/name";
 
+import { buildConvKey, loadTurns, turnsToMessages, saveTurn } from "@/lib/memory";
+
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -104,6 +107,10 @@ export async function POST(req: NextRequest) {
       if (isTextMessageEvent(event)) {
         const userText = event.message.text;
 
+        const convKey = buildConvKey(event);
+        const historyTurns = await loadTurns(convKey);
+        const historyMsgs = turnsToMessages(historyTurns);
+
         // 呼び名（下の名前）ヒントを LLM＋キャッシュで取得
         const nameHint = await getNameHintForEvent(client, event);
 
@@ -111,9 +118,9 @@ export async function POST(req: NextRequest) {
         const metrics = parseMetrics(userText);
         const metricHint =
           metrics.distanceKm ||
-          metrics.minutes ||
-          metrics.paceMinPerKm ||
-          metrics.reps
+            metrics.minutes ||
+            metrics.paceMinPerKm ||
+            metrics.reps
             ? `抽出した数値: ${JSON.stringify(metrics)}`
             : "抽出できる数値は無し。";
 
@@ -125,8 +132,8 @@ export async function POST(req: NextRequest) {
         const plannedTone: RewardTone = plannedAttach
           ? "SEND"
           : userWantsReward
-          ? "HOLD"
-          : "NONE";
+            ? "HOLD"
+            : "NONE";
 
         // OpenAI
         let aiText = "今は忙しいので、また後で話しかけてね！";
@@ -136,6 +143,7 @@ export async function POST(req: NextRequest) {
             displayName: nameHint ?? undefined,
             metricHint,
             rewardTone: plannedTone,
+            historyMessages: historyMsgs,
           });
         } catch (e) {
           const msg = (e as Error).message;
@@ -156,9 +164,9 @@ export async function POST(req: NextRequest) {
           tag.training === true ||
           Boolean(
             metrics.distanceKm ||
-              metrics.minutes ||
-              metrics.paceMinPerKm ||
-              metrics.reps
+            metrics.minutes ||
+            metrics.paceMinPerKm ||
+            metrics.reps
           );
 
         // 添付可否
@@ -175,6 +183,8 @@ export async function POST(req: NextRequest) {
                 previewImageUrl: reward.preview,
               },
             ]);
+            // ★ 履歴保存（テキスト送信は1回なので1往復だけ記録）
+            await saveTurn(convKey, { u: userText, a: aiText, ts: Date.now(), meta: { src: "text" } });
             return;
           }
         }
@@ -213,6 +223,10 @@ export async function POST(req: NextRequest) {
         const mime = sniffImageMime(buf);
         const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
 
+        const convKey = buildConvKey(event);
+        const historyTurns = await loadTurns(convKey);
+        const historyMsgs = turnsToMessages(historyTurns);
+
         // 呼び名ヒント
         const nameHint = await getNameHintForEvent(client, event);
 
@@ -227,6 +241,7 @@ export async function POST(req: NextRequest) {
             dataUrl,
             displayName: nameHint ?? undefined,
             rewardTone: plannedTone,
+            historyMessages: historyMsgs,
           });
         } catch (e) {
           const msg = (e as Error).message;
