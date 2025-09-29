@@ -34,12 +34,14 @@ export async function chatText({
   metricHint,
   rewardTone,
   historyMessages,
+  historySystem, 
 }: {
   userText: string;
   displayName?: string | null;
   metricHint?: string;
   rewardTone: RewardTone;
   historyMessages?: ChatMsg[];
+  historySystem?: string;
 }): Promise<string> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -48,6 +50,7 @@ export async function chatText({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: buildSystemPromptBase(displayName ?? undefined, rewardTone) },
+        ...(historySystem ? [{ role: "system", content: historySystem }] : []), 
         ...(metricHint ? [{ role: "system", content: metricHint }] : []),
         ...(historyMessages ?? []),
         { role: "user", content: userText },
@@ -70,11 +73,13 @@ export async function chatVision({
   displayName,
   rewardTone,
   historyMessages, 
+  historySystem,
 }: {
   dataUrl: string;
   displayName?: string | null;
   rewardTone: RewardTone;
   historyMessages?: ChatMsg[]; 
+  historySystem?: string;
 }): Promise<string> {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -83,6 +88,7 @@ export async function chatVision({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: buildSystemPromptBase(displayName ?? undefined, rewardTone) },
+        ...(historySystem ? [{ role: "system", content: historySystem }] : []),
         ...(historyMessages ?? []),
         {
           role: "user",

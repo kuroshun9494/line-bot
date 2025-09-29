@@ -52,3 +52,16 @@ export function turnsToMessages(turns: Turn[]): Array<{ role: "user" | "assistan
   }
   return msgs;
 }
+
+// 履歴（古→新）を短い system 用テキストにする
+export function turnsToSystemContext(turns: Turn[], maxChars = 900): string {
+  const lines: string[] = ["直近の会話履歴（古→新）要約:"];
+  for (const t of turns) {
+    const u = t.u.replace(/\s+/g, " ").slice(0, 140);
+    const a = t.a.replace(/\s+/g, " ").slice(0, 160);
+    lines.push(`- U: ${u}`);
+    lines.push(`  A: ${a}`);
+    if (lines.join("\n").length > maxChars) break;
+  }
+  return lines.join("\n");
+}

@@ -32,7 +32,7 @@ import {
 import { chatText, chatVision, type RewardTone } from "@/lib/ai";
 import { getNameHintForEvent } from "@/lib/name";
 
-import { buildConvKey, loadTurns, turnsToMessages, saveTurn } from "@/lib/memory";
+import { buildConvKey, loadTurns, turnsToMessages, saveTurn, turnsToSystemContext } from "@/lib/memory";
 
 
 export const runtime = "nodejs";
@@ -134,6 +134,7 @@ export async function POST(req: NextRequest) {
         const convKey = buildConvKey(event);
         const historyTurns = await loadTurns(convKey);
         const historyMsgs = turnsToMessages(historyTurns);
+        const historySys   = turnsToSystemContext(historyTurns);
 
         // 呼び名（下の名前）ヒントを LLM＋キャッシュで取得
         const nameHint = await getNameHintForEvent(client, event);
@@ -168,6 +169,7 @@ export async function POST(req: NextRequest) {
             metricHint,
             rewardTone: plannedTone,
             historyMessages: historyMsgs,
+            historySystem: historySys, 
           });
         } catch (e) {
           const msg = (e as Error).message;
@@ -250,6 +252,7 @@ export async function POST(req: NextRequest) {
         const convKey = buildConvKey(event);
         const historyTurns = await loadTurns(convKey);
         const historyMsgs = turnsToMessages(historyTurns);
+        const historySys = turnsToSystemContext(historyTurns);
 
         // 呼び名ヒント
         const nameHint = await getNameHintForEvent(client, event);
@@ -266,6 +269,7 @@ export async function POST(req: NextRequest) {
             displayName: nameHint ?? undefined,
             rewardTone: plannedTone,
             historyMessages: historyMsgs,
+            historySystem: historySys,
           });
         } catch (e) {
           const msg = (e as Error).message;
