@@ -171,6 +171,7 @@ export async function POST(req: NextRequest) {
             historyMessages: historyMsgs,
             historySystem: historySys, 
           });
+          console.log("history_sys_len", historySys.length);
         } catch (e) {
           const msg = (e as Error).message;
           if (msg.includes("429")) {
