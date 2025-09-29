@@ -1,4 +1,5 @@
 // src/app/api/line/webhook/route.ts
+import type { Client } from "@line/bot-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { validateSignature } from "@line/bot-sdk";
 import type {
@@ -48,6 +49,26 @@ function isImageMessageEvent(
 ): e is MessageEvent & { message: ImageEventMessage } {
   return e.type === "message" && (e as MessageEvent).message.type === "image";
 }
+
+// “宛てられているか” の判定（テキスト）
+async function isAddressedTextMessage(
+  e: MessageEvent & { message: TextEventMessage },
+  client: Client
+): Promise<boolean> {
+  const srcType = e.source.type;
+  if (srcType === "user") return true;
+  const text = e.message.text;
+  return (await isMentionedBot(e, client)) || containsMentionKeyword(text);
+}
+
+// “宛てられているか” の判定（画像）
+function isAddressedImageMessage(e: MessageEvent & { message: ImageEventMessage }): boolean {
+  const srcType = e.source.type;
+  if (srcType === "user") return true; // DMは常に宛てられている
+  // 画像はメンション不可 → 直前メンションの猶予（1分）内なら宛てられているとみなす
+  return withinRecentMention(e);
+}
+
 
 /* ---------- Verify ---------- */
 export async function GET() {
@@ -106,6 +127,9 @@ export async function POST(req: NextRequest) {
       /* ===================== テキスト ===================== */
       if (isTextMessageEvent(event)) {
         const userText = event.message.text;
+
+        // ★ 追加：この発話が“宛てられている”か（DM or メンション or キーワード）
+        const addressed = await isAddressedTextMessage(event, client);
 
         const convKey = buildConvKey(event);
         const historyTurns = await loadTurns(convKey);
@@ -184,15 +208,13 @@ export async function POST(req: NextRequest) {
               },
             ]);
             // ★ 履歴保存（テキスト送信は1回なので1往復だけ記録）
-            await saveTurn(convKey, { u: userText, a: aiText, ts: Date.now(), meta: { src: "text" } });
+            if (addressed) await saveTurn(convKey, { u: userText, a: aiText, ts: Date.now(), meta: { src: "text" } });
             return;
           }
         }
 
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: aiText,
-        });
+        await client.replyMessage(event.replyToken, { type: "text", text: aiText });
+        if (addressed) await saveTurn(convKey, { u: userText, a: aiText, ts: Date.now(), meta: { src: "text" } });
         return;
       }
 
@@ -222,6 +244,8 @@ export async function POST(req: NextRequest) {
 
         const mime = sniffImageMime(buf);
         const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
+
+        const addressed = isAddressedImageMessage(event);
 
         const convKey = buildConvKey(event);
         const historyTurns = await loadTurns(convKey);
@@ -273,14 +297,13 @@ export async function POST(req: NextRequest) {
                 previewImageUrl: reward.preview,
               },
             ]);
+            if (addressed) await saveTurn(convKey, { u: "[画像]", a: aiText, ts: Date.now(), meta: { src: "image" } });
             return;
           }
         }
 
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: aiText,
-        });
+        await client.replyMessage(event.replyToken, { type: "text", text: aiText });
+        if (addressed) await saveTurn(convKey, { u: "[画像]", a: aiText, ts: Date.now(), meta: { src: "image" } });
         return;
       }
 
